@@ -20,21 +20,32 @@
 //  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //  SOFTWARE.
 
-#import <Foundation/Foundation.h>
+@import Foundation;
+@import CoreLocation;
 
 typedef void (^SHLocationCompletionHandler)(CLLocation *location, NSError *error);
-
-@class CLLocation;
 
 @protocol SHLocationManagerDelegate;
 
 
 @interface SHLocationManager : NSObject
 
-@property (nonatomic, readonly, getter=isLocating) BOOL locating;
+- (instancetype)init; // uses kCLAuthorizationStatusAuthorized
+
+/*
+ * Uses kCLAuthorizationStatusAuthorizedAlways or kCLAuthorizationStatusAuthorizedWhenInUse
+ */
+- (instancetype)initWithStatus:(CLAuthorizationStatus)status __OSX_AVAILABLE_STARTING(__MAC_NA, __IPHONE_8_0);
+
+@property (nonatomic, readonly, getter = isLocating) BOOL locating;
+
+@property (nonatomic, readonly) BOOL hasValidLocation;
 
 - (void)startUpdatingLocationWithCompletionHandler:(SHLocationCompletionHandler)completionHandler;
 - (void)cancelUpdatingLocation;
+
+- (void)startUpdatingLocation;
+- (void)waitForValidLocationWithCompletionHandler:(SHLocationCompletionHandler)completionHandler;
 
 @property (weak, nonatomic) id <SHLocationManagerDelegate> delegate;
 

@@ -21,24 +21,25 @@
 //  SOFTWARE.
 
 #import "SHLocationManager.h"
-#import <CoreLocation/CoreLocation.h>
-
 
 @interface SHLocationManager () <CLLocationManagerDelegate>
 @property (copy, nonatomic) SHLocationCompletionHandler completionHandler;
 @end
 
 @implementation SHLocationManager {
+    CLAuthorizationStatus _status;
+    
     CLLocationManager *_locationManager;
     CLLocation *_lastLocation;
     
     NSTimer *_locationTimer;
     
     BOOL _locating;
+    
+    BOOL _needsCheckTimer;
 }
 
-- (CLLocationManager *)locationManager
-{
+- (CLLocationManager *)locationManager {
     if (!_locationManager) {
         _locationManager = [CLLocationManager new];
         _locationManager.delegate = self;
@@ -47,10 +48,15 @@
     return _locationManager;
 }
 
-- (id)init
-{
+- (instancetype)init {
+    return [self initWithStatus:kCLAuthorizationStatusAuthorized];
+}
+
+- (instancetype)initWithStatus:(CLAuthorizationStatus)status {
     self = [super init];
     if (self) {
+        _status = status;
+        
         self.desiredAccuracy = 100.0;
         self.locationAge = 10.0;
         self.locationTimeout = 30.0;
@@ -58,43 +64,56 @@
     return self;
 }
 
-- (void)dealloc
-{
+- (void)dealloc {
     [_locationTimer invalidate], _locationTimer = nil;
 }
 
-- (BOOL)isLocating
-{
+- (BOOL)isLocating {
     return _locating;
 }
 
-+ (BOOL)canLocate
-{
-	CLAuthorizationStatus authStatus = [CLLocationManager authorizationStatus];
-	if ( [CLLocationManager locationServicesEnabled]
-		&&
-		( authStatus == kCLAuthorizationStatusNotDetermined ||
-		 authStatus == kCLAuthorizationStatusAuthorized )
-		)
-	{
-		return YES;
-	}
-	
-	return NO;
+- (void)requestAuthorization {
+#ifdef __IPHONE_8_0
+    if (_status == kCLAuthorizationStatusAuthorizedAlways) {
+        [self.locationManager requestAlwaysAuthorization];
+    }
+    else if (_status == kCLAuthorizationStatusAuthorizedWhenInUse) {
+        [self.locationManager requestWhenInUseAuthorization];
+    }
+#endif
 }
 
-- (void)startUpdatingLocationWithCompletionHandler:(SHLocationCompletionHandler)completionHandler
-{
-    if ( [SHLocationManager canLocate] ) {
+- (BOOL)canLocate {
+    CLAuthorizationStatus authStatus = CLLocationManager.authorizationStatus;
+    
+    if (authStatus == kCLAuthorizationStatusNotDetermined) {
+        if (NSFoundationVersionNumber > NSFoundationVersionNumber_iOS_7_1) {
+            [self requestAuthorization];
+        }
+    }
+    
+    BOOL allowedStatus = authStatus == kCLAuthorizationStatusNotDetermined || authStatus == kCLAuthorizationStatusAuthorized;
+    if (NSFoundationVersionNumber > NSFoundationVersionNumber_iOS_7_1) {
+#ifdef __IPHONE_8_0
+        allowedStatus |= authStatus == kCLAuthorizationStatusAuthorizedWhenInUse;
+#endif
+    }
+    
+	if ( [CLLocationManager locationServicesEnabled] && allowedStatus ) {
+		return YES;
+    } else {
+        return NO;
+    }
+}
+
+- (void)startUpdatingLocationWithCompletionHandler:(SHLocationCompletionHandler)completionHandler {
+    if ( [self canLocate] ) {
         self.completionHandler = completionHandler;
         
         _locating = YES;
         [self.locationManager startUpdatingLocation];
         
-        _locationTimer = [NSTimer timerWithTimeInterval:self.locationTimeout
-                                                 target:self
-                                               selector:@selector(timerFired:) userInfo:nil repeats:NO];
-        [[NSRunLoop mainRunLoop] addTimer:_locationTimer forMode:NSRunLoopCommonModes];
+        [self checkLocationTimer];
     } else {
         NSError *error = [NSError errorWithDomain:kCLErrorDomain code:kCLErrorDenied userInfo:nil];
         
@@ -104,22 +123,41 @@
     }
 }
 
-- (void)timerFired:(NSTimer *)timer
-{
-    NSLog(@"Location timer fired!");
+- (void)checkLocationTimer {
+    CLAuthorizationStatus authStatus = CLLocationManager.authorizationStatus;
+    
+    BOOL allowedStatus = authStatus == kCLAuthorizationStatusAuthorized;
+    if (NSFoundationVersionNumber > NSFoundationVersionNumber_iOS_7_1) {
+#ifdef __IPHONE_8_0
+        allowedStatus |= authStatus == kCLAuthorizationStatusAuthorizedWhenInUse;
+#endif
+    }
+    
+    if (allowedStatus) {
+        _locationTimer = [NSTimer timerWithTimeInterval:(_hasValidLocation ? 0.5 : self.locationTimeout)
+                                                 target:self
+                                               selector:@selector(timerFired:) userInfo:nil repeats:NO];
+        [[NSRunLoop mainRunLoop] addTimer:_locationTimer forMode:NSRunLoopCommonModes];
+    }
+    else if (authStatus == kCLAuthorizationStatusNotDetermined) {
+        _needsCheckTimer = YES;
+    }
+}
+
+- (void)timerFired:(NSTimer *)timer {
     [self finishLocating];
 }
 
-- (void)cancelUpdatingLocation
-{
+- (void)cancelUpdatingLocation {
     [self.locationManager stopUpdatingLocation];
+    
     _locating = NO;
+    _hasValidLocation = NO;
 
     [_locationTimer invalidate], _locationTimer = nil;
 }
 
-- (void)finishLocating
-{
+- (void)finishLocating {
     @synchronized(self) {
         [self cancelUpdatingLocation];
         
@@ -137,20 +175,58 @@
     }
 }
 
+- (void)startUpdatingLocation {
+    if ( [self canLocate] ) {
+        _locating = YES;
+        [self.locationManager startUpdatingLocation];
+    }
+}
+
+- (void)waitForValidLocationWithCompletionHandler:(SHLocationCompletionHandler)completionHandler {
+    if ( [self canLocate] ) {
+        self.completionHandler = completionHandler;
+        
+        [self checkLocationTimer];
+    } else {
+        NSError *error = [NSError errorWithDomain:kCLErrorDomain code:kCLErrorDenied userInfo:nil];
+        
+        if (completionHandler) {
+            completionHandler(nil, error);
+        }
+    }
+}
+
 #pragma mark - Location manager delegate methods
 
-- (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray *)locations
-{
-    _lastLocation = locations.lastObject;
+- (void)locationManager:(CLLocationManager *)manager didChangeAuthorizationStatus:(CLAuthorizationStatus)status {
+    NSLog(@"CLLocationManager: auth status = %d", status);
     
-    NSLog(@"Last location accuracy = %f", _lastLocation.horizontalAccuracy);
+    if (_needsCheckTimer) {
+        _needsCheckTimer = NO;
+        [self checkLocationTimer];
+    }
+}
+
+- (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray *)locations {
+    CLLocation *newLocation = locations.lastObject;
     
-    if (_lastLocation.horizontalAccuracy <= self.desiredAccuracy) {
-        NSDate *eventDate = _lastLocation.timestamp;
+    if (!_hasValidLocation) {
+        _lastLocation = newLocation;
+    }
+    
+    NSLog(@"New location accuracy = %f", newLocation.horizontalAccuracy);
+    
+    if (newLocation.horizontalAccuracy <= self.desiredAccuracy) {
+        NSDate *eventDate = newLocation.timestamp;
         NSTimeInterval howRecent = [eventDate timeIntervalSinceNow];
         
         if ( fabs(howRecent) <= self.locationAge ) {
-            [self finishLocating];
+            _hasValidLocation = YES;
+            _lastLocation = newLocation;
+            
+            if (self.completionHandler) {
+                [self finishLocating];
+            }
         } else {
             NSLog(@"Outdated timestamp!");
         }
@@ -163,15 +239,14 @@
     }
 }
 
-- (void)locationManager:(CLLocationManager *)manager didFailWithError:(NSError *)error
-{
+- (void)locationManager:(CLLocationManager *)manager didFailWithError:(NSError *)error {
     if (error.code == kCLErrorLocationUnknown) {
         return;
     }
     
-    [self cancelUpdatingLocation];
-    
     if (self.completionHandler) {
+        [self cancelUpdatingLocation];
+        
         self.completionHandler(nil, error);
     }
 }
